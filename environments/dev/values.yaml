@@ -1,0 +1,64 @@
+replicaCount: 1
+
+
+image:
+  repository: 
+  pullPolicy: Always
+  tag: latest
+
+
+imagePullSecrets:
+  - name: acr-pull-secret
+
+
+secrets:
+  ENCRYPTION_KEY:
+
+
+env:
+  AUTH_CLIENT_ID: 
+  AUTH_CLIENT_SECRET: 
+  AUTH_DEFAULT_TARGET_URI: 
+  AUTH_IDENTITY_SERVER_URI: 
+
+
+  DATABASE_URL: 
+  DATABASE_USERNAME: 
+  DATABASE_PASSWORD: 
+
+
+  PARAMS: dev
+  
+  LDAP_BASE: ou=people,o=any
+  LDAP_ENDPOINT: 
+  LDAP_USERNAME: 
+  LDAP_PASSWORD: 
+
+
+  SPRING_PROFILES_ACTIVE: cloud
+
+
+resources: {​​​​​​​}​​​​​​​
+
+
+nodeSelector: {​​​​​​​}​​​​​​​
+
+
+tolerations: []
+
+
+affinity: {​​​​​​​}​​​​​​​
+ 
+
+
+
+
+
+
+
+
+
+
+
+
+

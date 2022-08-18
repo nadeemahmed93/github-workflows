@@ -1,0 +1,79 @@
+name: Generate feedback on labeled pull requests 
+on:
+  pull_request:
+    branches:
+    - master
+    
+    types:
+    - opened
+    - labeled
+    - unlabeled
+    paths:
+    - 'src/**'
+  
+
+ 
+
+jobs:
+  preview-versioning:
+    name: Preview automated versioning
+    runs-on: self-hosted
+    steps:
+        
+    # Checkout the repository to the GitHub Actions runner
+    - name: Checkout
+      uses: actions/checkout@v2
+
+ 
+
+    # Creates a SemVer tag based on the PR labels
+    - name: Create semver tag from PR labels
+      id: semver
+      uses: timperman/semver-release-action@master
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        release_branch:  # Change me after merging and testing
+        release_strategy: none
+        tag_format: 'v%major%.%minor%.%patch%'
+
+ 
+
+    # Comment on the PR with the generated SemVer version
+    - name: Comment on PR with generated versioning
+      uses: actions/github-script@0.9.0
+      with:
+        script: |
+            const { owner, repo } = context.repo
+            const issue_number = context.issue.number
+            const tag = '${{ steps.semver.outputs.tag }}'
+            const text = (tag !== '')
+              ? `GitHub Actions will create a \`${tag}\` release when this pull request is merged`
+              : '**N/A** - consider adding a `major`, `minor`, or `patch` label for automated [semantic versioning](https://semver.org)'
+            const body = `### Automated Versioning\n${text}`
+
+ 
+
+            const comments = await github.issues.listComments({
+              issue_number,
+              owner,
+              repo
+            })
+            const comment = comments.data.find(comment => comment.user.login === 'github-actions[bot]' && comment.body.startsWith('### Automated Versioning'))
+            if (comment) {
+              await github.issues.updateComment({
+                owner,
+                repo,
+                comment_id: comment.id,
+                body
+              })
+            }
+            else {
+              await github.issues.createComment({
+                issue_number,
+                owner,
+                repo,
+                body
+              })
+            }
+ 

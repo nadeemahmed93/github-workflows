@@ -1,0 +1,162 @@
+name: Production Build and Deploy
+
+ 
+
+on:
+  release:
+    types: [ published, released ]
+
+ 
+
+
+env:
+  NONPROD_REGISTRY_NAME: '<NONPROD_REGISTRY_NAME>'
+  PROD_REGISTRY_NAME: '<PROD_REGISTRY_NAME>'
+  REGISTRY_USERNAME: '<REGISTRY_USERNAME>'
+  APPLICATION_NAME: '<APPLICATION_NAME>'
+  SONAR_SCANNER_URL: "<SONAR_SCANNER_URL>"
+  KEYVAULT_NAME: '<KEYVAULT_NAME>'
+  NAMESPACE: '<NAMESPACE>'
+  HELM_VERSION: '3.4.0'
+  RESOURCE_GROUP: '<RESOURCE_GROUP>'
+  CLUSTER_NAME: '<CLUSTER_NAME>'
+
+ 
+
+
+jobs:
+  build:
+    runs-on: self-hosted
+
+ 
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Login to the Nonprod-ACR using Service Principal
+      - name: Login to Non-Prod ACR
+        uses: azure/docker-login@v1
+        with:
+          login-server: ${{ env.NONPROD_REGISTRY_NAME }}.azurecr.io
+          username: ${{ env.REGISTRY_USERNAME }}
+          password: ${{ secrets.SERVICE_PRINCIPAL_CLIENT_SECRET }} # ${{ secrets.REGISTRY_PASSWORD }}
+
+ 
+
+      # Pull Non-Prod Docker Image
+      - name: ?? Pull NonProd Docker Image
+        id: pullnonprodacr
+        continue-on-error: true
+        run: |
+          IMAGE_NAME="${{ env.NONPROD_REGISTRY_NAME }}.azurecr.io/${{ env.APPLICATION_NAME}}:${{ github.event.release.tag_name }}"
+          docker pull $IMAGE_NAME
+
+ 
+
+      # Login to the Prod ACR using Service Principal
+      - name: Login to Prod ACR
+        uses: azure/docker-login@v1
+        with:
+          login-server: ${{ env.PROD_REGISTRY_NAME }}.azurecr.io
+          username: ${{ env.REGISTRY_USERNAME }}
+          password: ${{ secrets.SERVICE_PRINCIPAL_CLIENT_SECRET }} # ${{ secrets.REGISTRY_PASSWORD }}
+
+ 
+
+      # Push the image to prod ACR
+      - name: ?? Push the image to Prod ACR
+        if: ${{ steps.pullnonprodacr.outcome == 'success' }}
+        run: |
+          IMAGE_NAME="${{ env.NONPROD_REGISTRY_NAME }}.azurecr.io/${{ env.APPLICATION_NAME}}:${{ github.event.release.tag_name }}"
+          IMAGE_NAME_PROD="${{ env.PROD_REGISTRY_NAME }}.azurecr.io/${{ env.APPLICATION_NAME}}:${{ github.event.release.tag_name }}"
+          docker tag $IMAGE_NAME $IMAGE_NAME_PROD
+          docker push $IMAGE_NAME_PROD
+
+ 
+
+      # If there's a failure pulling the image, we want to build the application again.
+      - name: Checkout
+        if: ${{ steps.pullnonprodacr.outcome == 'failure' }}
+        uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+
+ 
+
+      # Docker build, SonarQube and Prod ACR push if image not found in NonProd ACR
+      - name: Build application if image not found
+        if: ${{ steps.pullnonprodacr.outcome == 'failure' }}
+        run: |
+          IMAGE_NAME_PROD="${{ env.PROD_REGISTRY_NAME }}.azurecr.io/${{ env.APPLICATION_NAME }}:${{ github.event.release.tag_name }}"
+          docker build -t $IMAGE_NAME_PROD \
+            --build-arg SONAR_SCANNER_URL=${{ env.SONAR_SCANNER_URL }} \
+            --build-arg SONAR_TOKEN=${{ secrets.SONAR_TOKEN }} .
+          docker push $IMAGE_NAME_PROD
+
+ 
+
+      # Docker container scan should run after docker build and before docker push
+      - name: ?? Azure container scan ??
+        if: ${{ steps.pullnonprodacr.outcome == 'failure' }}
+        continue-on-error: true
+        uses: azure/container-scan@v0
+        with:
+          image-name: ${{ env.PROD_REGISTRY_NAME }}.azurecr.io/${{ env.APPLICATION_NAME }}:${{ github.event.release.tag_name }}
+          username: ${{ env.REGISTRY_USERNAME }}
+          password: ${{ secrets.SERVICE_PRINCIPAL_CLIENT_SECRET }} # ${{ secrets.REGISTRY_PASSWORD }}
+
+ 
+
+  deploy:
+    name: 'Deploy to Prod'
+    needs: build
+    runs-on: self-hosted
+
+ 
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Login to Azure with the appropriate credentials
+      - name: Login
+        uses: Azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_DEPLOY_CREDENTIALS }} 
+        
+      # Retrieves secrets from Key Vault
+      - name: Get Kubernetes Secrets
+        uses: Azure/get-keyvault-secrets@v1.1
+        with:
+          keyvault: ${{ env.KEYVAULT_NAME }}
+          secrets: 'encryptionkey-prod'
+        id: getSecrets
+      
+      # Sets the AKS context with credentials
+      - name: Setting AKS set context  
+        uses: azure/aks-set-context@v1
+        with:
+            creds: ${{ secrets.AZURE_DEPLOY_CREDENTIALS }}
+            resource-group: ${{ env.RESOURCE_GROUP }}
+            cluster-name: ${{ env.CLUSTER_NAME }}
+      
+      # Setup Helm
+      - name: Install Helm
+        uses: azure/setup-helm@v1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+ 
+
+      # Update chart dependencies
+      - name: Helm dependency update
+        run: helm dependency update ${{ github.workspace }}/charts/${{ env.APPLICATION_NAME }}
+
+ 
+
+      # Deploy the chart with secrets retrieved from Key Vault
+      - name: Helm upgrade
+        run: |
+          helm upgrade --install \
+            ${{ env.APPLICATION_NAME }} ${{ github.workspace}}/charts/${{ env.APPLICATION_NAME }} \
+            --values ${{ github.workspace }}/environments/prod/values.yaml \
+            --set image.tag=${{ github.event.release.tag_name }} \
+            --set secrets.ENCRYPTION_KEY=${{ steps.getSecrets.outputs.encryptionkey-prod }} \
+            --namespace ${{ env.NAMESPACE }}

@@ -1,0 +1,171 @@
+name: 'Deploy Terraform NonProd'
+
+ 
+
+on:
+  push:
+    branches:
+      - master
+  
+    paths:
+     - "terraform/**"
+
+ 
+
+  pull_request:
+    paths:
+     - "terraform/**"
+
+ 
+
+# Global environment Variables which is used in the GitHub Actions Pipeline
+env:
+  # Secrets needed as input variables to terraform
+  TF_VAR_service_principal_client_secret: ${{ secrets.SERVICE_PRINCIPAL_CLIENT_SECRET }}
+  TF_VAR_rbac_server_secret: ${{ secrets.RBAC_SERVER_SECRET }}
+  keyVaultName: 'infra-nonprod-vault'
+
+ 
+
+  # Specifying Terraform version to be used
+  TERRAFORM_VERSION: '0.13.5'
+
+ 
+
+  # Storage account values for Terraform backend
+  BACKEND_CONFIG_RESOURCE_GROUP_NAME: 
+  BACKEND_CONFIG_STORAGE_ACCOUNT_NAME: ''
+  BACKEND_CONFIG_CONTAINER_NAME: 'tfstate'
+  BACKEND_CONFIG_KEY: 'terraform.tfstate'
+
+ 
+
+  # Service Principal values for Terraform
+  ARM_CLIENT_ID: 
+  ARM_CLIENT_SECRET: ${{ secrets.SERVICE_PRINCIPAL_CLIENT_SECRET }}
+  ARM_SUBSCRIPTION_ID: 
+  ARM_TENANT_ID: 
+
+ 
+
+jobs:
+  terraform:
+    name: 'Terraform'
+    runs-on: self-hosted
+
+ 
+
+    defaults:
+      run:
+        # Use the Bash shell regardless whether the GitHub Actions runner is ubuntu-latest, macos-latest, or windows-latest
+        shell: bash
+      # Directory where the Terraform code lives
+        working-directory: ./terraform/aks-nonprod/
+
+ 
+
+    steps:
+    # Checkout the repository to the GitHub Actions runner
+    - name: Checkout
+      uses: actions/checkout@v2
+
+ 
+
+    # Install the specified version of Terraform CLI and configure the Terraform CLI configuration file with a Terraform Cloud user API token
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v1
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+        terraform_wrapper: true
+    - name: Login
+      uses: Azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }} 
+
+ 
+
+    # Checks that all Terraform configuration files adhere to a canonical format
+    - name: Terraform format
+      id: fmt
+      run: terraform fmt -check
+      continue-on-error: true
+
+ 
+
+    # Initialize a new or existing Terraform working directory by creating initial files, loading any remote state, downloading modules, etc.
+    - name: Terraform init
+      id: init
+      run: |
+        sh ${{ github.workspace }}/.github/scripts/tf-init
+
+ 
+
+    # Validate the configuration files in a directory, referring only to the configuration and not accessing any remote services such as remote state, provider APIs, etc.
+    - name: Terraform validate
+      id: validate
+      run: terraform validate -no-color
+
+ 
+
+    # Generates an execution plan for Terraform
+    - name: Terraform plan
+      id: plan
+      if: github.event_name == 'pull_request'
+      run: |
+        terraform plan -no-color -input=false -detailed-exitcode
+      continue-on-error: true
+
+ 
+
+    # Capturing plan to comment on the pull request
+    - name: Update Pull Request
+      uses: actions/github-script@0.9.0
+      if: ${{ github.event_name == 'pull_request' && steps.plan.outputs.exitcode == 2 }}
+      env:
+        PLAN: "terraform\n${{ steps.plan.outputs.stdout }}"
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          const output = `#### Terraform Format and Style ??\`${{ steps.fmt.outcome }}\`
+          #### Terraform Initialization ??\`${{ steps.init.outcome }}\`
+          #### Terraform Validation ??\`${{ steps.validate.outcome }}\`
+          #### Terraform Plan ??\`success\`
+          <details><summary>Show Plan</summary>
+          
+          \`\`\`${process.env.PLAN}\`\`\`
+          
+          </details>
+
+ 
+
+          *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`, Workflow: \`${{ github.workflow }}\`*`;
+            
+          github.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: output
+          })
+  
+    # Highlights whenever a plan fails because the "Terraform Plan" step continues on error
+    - name: Terraform Failed Plan Status
+      if: ${{ steps.plan.outputs.exitcode == 1 && github.event_name == 'pull_request'}} 
+      run: |
+        echo "Terraform plan returned ${{ steps.plan.outputs.exitcode }}"
+        exit ${{ steps.plan.outputs.exitcode }}
+
+ 
+
+    # Highlights whenever a plan fails because the "Terraform Plan" step continues on error
+    - name: Terraform No Change Plan Status
+      if: ${{ steps.plan.outputs.exitcode == 0  && github.event_name == 'pull_request'}} 
+      run: |
+        echo "Terraform plan returned ${{ steps.plan.outputs.exitcode }}"
+        echo "No Changes in the infrastructure"
+        exit 1
+        
+    # Build or change infrastructure according to Terraform configuration files
+    - name: Terraform Apply
+      # if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+      if: github.ref == 'refs/heads/' && github.event_name == 'push' 
+      run: terraform apply -auto-approve

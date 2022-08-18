@@ -1,0 +1,176 @@
+name: Create Draft Release and Deploy to Stage Environment
+
+ 
+
+on:
+  pull_request:
+    branches:
+    - master
+    
+    types:
+    - closed
+    paths:
+      - 'src/**'
+
+ 
+
+
+env:
+  REGISTRY_NAME: '<REGISTRY_NAME>'
+  REGISTRY_USERNAME: '<REGISTRY_USERNAME>'
+  KEYVAULT_NAME: '<KEYVAULT_NAME>'
+  APPLICATION_NAME: '<APPLICATION_NAME>' 
+  NAMESPACE: '<NAMESPACE>'
+  HELM_VERSION: '3.4.0'
+  RESOURCE_GROUP: '<RESOURCE_GROUP>'
+  CLUSTER_NAME: '<CLUSTER_NAME>'
+
+ 
+
+jobs:
+  create-draft-release:
+    name: Automated semantic versioned draft release
+    runs-on: self-hosted
+
+ 
+
+    steps:
+
+ 
+
+      # Check out the master branch
+      - name: Checkout
+        uses: actions/checkout@v2
+    #   with:
+    #     ref: master
+
+ 
+
+      # Creates a semver tag from labels
+      - name: Create semver tag from PR labels
+        id: semver
+        uses: timperman/semver-release-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          release_branch:  # Change me after merging and testing
+          release_strategy: none
+          tag_format: 'v%major%.%minor%.%patch%'
+
+ 
+
+      # Create draft release
+      - name: Create release
+        id: create-release
+        uses: actions/create-release@v1
+        if: success() && steps.semver.outputs.tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.semver.outputs.tag }}
+          release_name: Release ${{ steps.semver.outputs.tag }}
+          body: |
+            Automated versioning for merged PR (#${{ github.event.pull_request.number }}):
+          
+            ### ${{ github.event.pull_request.title }}
+
+ 
+
+            ${{ github.event.pull_request.body }}
+          draft: true # set draft and pre-release to false, use a personal access token secret as the GITHUB_TOKEN in this job's env, and continuously deploy to production!
+          prerelease: true
+  
+  deploy-to-stage:
+    name: Deploy to Staging
+    needs: create-draft-release
+    runs-on: self-hosted
+    steps:
+
+ 
+
+      # Check out the master branch
+      - name: Checkout
+        uses: actions/checkout@v2
+        # with:
+          # ref: master
+
+ 
+
+      # Creates a semver tag from labels
+      - name: Create semver tag from PR labels
+        id: semver
+        uses: timperman/semver-release-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          release_branch:  # Change me after merging and testing
+          release_strategy: none
+          tag_format: 'v%major%.%minor%.%patch%'
+
+ 
+
+      # Login to the Azure using Service Principal
+      - name: Login to ACR
+        uses: azure/docker-login@v1
+        with:
+          login-server: ${{ env.REGISTRY_NAME }}.azurecr.io
+          username: ${{ env.REGISTRY_USERNAME }}
+          password: ${{ secrets.SERVICE_PRINCIPAL_CLIENT_SECRET }} # ${{ secrets.REGISTRY_PASSWORD }}
+
+ 
+
+      # Creates a Docker image with SemVer tag without rebuilding
+      - name: ?? Promote Docker image to Staging
+        run: |
+          IMAGE_NAME="${{ env.REGISTRY_NAME }}.azurecr.io/${{ env.APPLICATION_NAME }}"
+          docker pull $IMAGE_NAME:${{ github.event.pull_request.head.sha }}
+          docker tag $IMAGE_NAME:${{ github.event.pull_request.head.sha }} $IMAGE_NAME:${{ steps.semver.outputs.tag }}
+          docker push $IMAGE_NAME:${{ steps.semver.outputs.tag }}
+
+ 
+
+      # Login to Azure with the appropriate credentials
+      - name: Login
+        uses: Azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_DEPLOY_CREDENTIALS }} 
+        
+      # Retrieves secrets from Key Vault
+      - name: Get Kubernetes Secrets
+        uses: Azure/get-keyvault-secrets@v1.1
+        with:
+          keyvault: ${{ env.KEYVAULT_NAME }}
+          secrets: 'encryptionkey-stage'
+        id: getSecrets
+    
+      # Sets the AKS context with credentials
+      - name: Setting AKS set context  
+        uses: azure/aks-set-context@v1
+        with:
+          creds: ${{ secrets.AZURE_DEPLOY_CREDENTIALS }}
+          resource-group: ${{ env.RESOURCE_GROUP }}
+          cluster-name: ${{ env.CLUSTER_NAME }}
+    
+      # Setup Helm
+      - name: Install Helm
+        uses: azure/setup-helm@v1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+ 
+
+      # Update chart dependencies
+      - name: Helm dependency update
+        run: helm dependency update ${{ github.workspace }}/charts/${{ env.APPLICATION_NAME }}
+
+ 
+
+      # Deploy the chart with secrets retrieved from Key Vault
+      - name: Helm upgrade
+        run: |
+          helm upgrade --install \
+            ${{ env.APPLICATION_NAME }} ${{ github.workspace}}/charts/${{ env.APPLICATION_NAME }} \
+            --values ${{ github.workspace }}/environments/stage/values.yaml \
+            --set image.tag=${{ steps.semver.outputs.tag }} \
+            --set secrets.ENCRYPTION_KEY=${{ steps.getSecrets.outputs.encryptionkey-stage }} \
+            --namespace ${{ env.NAMESPACE }} 

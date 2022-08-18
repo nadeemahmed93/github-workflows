@@ -1,0 +1,55 @@
+name: ACR Purge Task
+
+ 
+
+# Manually triggered
+on: workflow_dispatch
+       
+env:
+  REGISTRY_NAME: '<REGISTRY_NAME>'
+  REGISTRY_USERNAME: '<REGISTRY_USERNAME>'
+  APPLICATION_NAME: '<APPLICATION_NAME>'
+  SUBSCRIPTION_ID: '<SUBSCRIPTION_ID>'
+  PURGE_CMD: 'acr purge --filter <IMAGE_NAME>:.* --ago 60d'
+    
+jobs:
+  purge:
+    name: 'Delete images older than 60days'
+    runs-on: self-hosted 
+    
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+    # Checkout the repository to the GitHub Actions runner
+    - name: Checkout
+      uses: actions/checkout@v2
+
+ 
+
+      # Login to Azure with the appropriate credentials
+    - name: Login
+      uses: Azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_DEPLOY_CREDENTIALS }}   #store the deploy credentials as secrets in github
+
+ 
+
+    # Deleting the images older than 60 days added as a task
+    # Cron Job "0 2 * * 0" 1st element stands for minutes (0-59), 2nd element stands for hour (0-23), 3rd  element stands for day(month) (1-31), 4th  element stands for month (1-12), 5th  element stands for day(week) (0-6)
+    # * * * * * 
+    # - - - - - 
+    # | | | | | 
+    # | | | | +---day of week(0 - 6)(Sunday = 0) 
+    # | | | +-----month(1 - 12) 
+    # | | +-------day of month(1 - 31) 
+    # | +---------hour(0 - 23) 
+    # +-----------min(0 - 59) 
+    # The wildcard (*) covers all values for the field.
+    - name: Purge ACR Task
+      run: |
+        az account set -s ${{ env.SUBSCRIPTION_ID }}
+        az acr task create --name purgetask --cmd  "${{ env.PURGE_CMD }}" --schedule "0 2 * * 0" --registry ${{ env.REGISTRY_NAME }} --context /dev/null 
+
+
+    # Display the created Task.
+    - name: Display the Task in Table format
+      run:  az acr task show --name purgetask --registry ${{ env.REGISTRY_NAME }} --output table

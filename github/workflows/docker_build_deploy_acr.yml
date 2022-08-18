@@ -1,0 +1,133 @@
+name: Dev Build and Deploy
+on: 
+  pull_request:
+    branches:
+      - master     #Triggers on pull request on master branch
+      
+    paths:
+      - 'src/**'
+
+env:
+  REGISTRY_NAME: '<REGISTRY_NAME>'
+  REGISTRY_USERNAME: '<REGISTRY_USERNAME>'
+  KEYVAULT_NAME: '<KEYVAULT_NAME>'
+  APPLICATION_NAME: '<APPLICATION_NAME>' 
+  NAMESPACE: '<NAMESPACE>'
+  HELM_VERSION: '3.4.0'    #change needed depend on helm chart version 
+  RESOURCE_GROUP: '<RESOURCE_GROUP>'
+  CLUSTER_NAME: '<CLUSTER_NAME>'
+  SONAR_SCANNER_URL: "<SONAR_SCANNER_URL>"  #if sonar scan is required
+
+ 
+
+jobs:
+  build:
+    name: 'Build Application'
+    runs-on: self-hosted 
+    
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Checkout the repository to the GitHub Actions runner
+    - name: Checkout
+      uses: actions/checkout@v2
+
+ 
+
+    # Creates compatible slug actions for Docker
+    - name: Inject slug/short variables
+      uses: rlespinasse/github-slug-action@v3.x
+
+ 
+
+    # Login to the Azure using Service Principal
+    - name: Login to ACR
+      uses: azure/docker-login@v1
+      with:
+        login-server: ${{ env.REGISTRY_NAME }}.azurecr.io
+        username: ${{ env.REGISTRY_USERNAME }}
+        password: ${{ secrets.SERVICE_PRINCIPAL_CLIENT_SECRET }} # ${{ secrets.REGISTRY_PASSWORD }} #store the secrets in github
+   
+    # Docker build, SonarQube and ACR push
+    - name: Docker build, SonarQube run and ACR push
+      run: |
+        IMAGE_NAME="${{ env.REGISTRY_NAME }}.azurecr.io/${{ env.APPLICATION_NAME }}"
+
+ 
+
+        docker build -t $IMAGE_NAME:${{ github.event.pull_request.head.sha }} -t $IMAGE_NAME:latest \
+        --build-arg SONAR_SCANNER_URL=${{ env.SONAR_SCANNER_URL }} \
+        --build-arg SONAR_TOKEN=${{ secrets.SONAR_TOKEN }} .    #if sonar scan exists
+        #docker build -t $IMAGE_NAME:${{ github.event.pull_request.head.sha }} -t $IMAGE_NAME:latest . #if sonar scan is not required
+        docker push $IMAGE_NAME
+
+ 
+
+    # Docker container scan should run after docker build and before docker push
+    - name: ?? Azure container scan ??
+      continue-on-error: true
+      uses: azure/container-scan@v0
+      with:
+        image-name: ${{ env.REGISTRY_NAME }}.azurecr.io/${{ env.APPLICATION_NAME }}:${{ github.event.pull_request.head.sha }}
+        username: ${{ env.REGISTRY_USERNAME }}
+        password: ${{ secrets.SERVICE_PRINCIPAL_CLIENT_SECRET }} # ${{ secrets.REGISTRY_PASSWORD }}
+
+ 
+
+  deploy:
+    name: 'Deploy to Non-Prod'
+    needs: build
+    runs-on: self-hosted
+
+ 
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Checkout the repository to the GitHub Actions runner
+      - name: Checkout
+        uses: actions/checkout@v2
+      
+      # Login to Azure with the appropriate credentials
+      - name: Login
+        uses: Azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_DEPLOY_CREDENTIALS }} 
+        
+      # Retrieves secrets from Key Vault
+      - name: Get Kubernetes Secrets
+        uses: Azure/get-keyvault-secrets@v1.1
+        with:
+          keyvault: ${{ env.KEYVAULT_NAME }}
+          secrets: 'encryptionkey-dev'
+        id: getSecrets
+      
+      # Sets the AKS context with credentials
+      - name: Setting AKS set context  
+        uses: azure/aks-set-context@v1
+        with:
+            creds: ${{ secrets.AZURE_DEPLOY_CREDENTIALS }}
+            resource-group: ${{ env.RESOURCE_GROUP }}
+            cluster-name: ${{ env.CLUSTER_NAME }}
+      
+      # Setup Helm
+      - name: Install Helm
+        uses: azure/setup-helm@v1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+ 
+
+      # Update chart dependencies
+      - name: Helm dependency update
+        run: helm dependency update ${{ github.workspace }}/charts/${{ env.APPLICATION_NAME }}
+
+ 
+
+      # Deploy the chart with secrets retrieved from Key Vault
+      - name: Helm upgrade
+        run: |
+          helm upgrade --install \
+            ${{ env.APPLICATION_NAME }} ${{ github.workspace}}/charts/${{ env.APPLICATION_NAME }} \
+            --values ${{ github.workspace }}/environments/dev/values.yaml \
+            --set image.tag=${{ github.event.pull_request.head.sha }} \
+            --set secrets.ENCRYPTION_KEY=${{ steps.getSecrets.outputs.encryptionkey-dev }} \
+            --namespace ${{ env.NAMESPACE }}
